@@ -1,0 +1,160 @@
+import math, random
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize, least_squares
+
+
+anchors = np.array([
+    [0, 0, 0],     
+    [10, 0, 0],   
+    [5, 8.66, 0],    
+    [5, 2.89, 8.165]     
+])
+
+
+def get_distance(p1, p2):
+    return math.sqrt((p1['x'] - p2['x'])**2 + (p1['y'] - p2['y'])**2 + (p1['z'] - p2['z'])**2)
+
+
+def generate_positions(n, range_x=50
+                       , range_y=50, range_z=50):
+    p = []
+    for i in range(n):
+        x = 2 * range_x * random.random() - range_x
+        y = 2 * range_y * random.random() - range_y
+        z = 2 * range_z * random.random() - range_z
+        p.append({'x': x, 'y': y, 'z': z})
+    return p
+
+
+def get_distances(positions, anchors):
+    distances = []
+    for p in positions:
+        d = [get_distance(p, {'x': anchors[i][0], 'y': anchors[i][1], 'z': anchors[i][2]}) for i in range(len(anchors))]
+        distances.append(d)
+    return distances
+
+
+def estimate_pos(anchors, distances):
+    [d1, d2, d3, d4] = distances
+
+    x_A, y_A, z_A = anchors[0]
+    x_B, y_B, z_B = anchors[1]
+    x_C, y_C, z_C = anchors[2]
+    x_D, y_D, z_D = anchors[3]
+
+    # Matrix A
+    A = np.array([
+        [2 * (x_A - x_D), 2 * (y_A - y_D), 2 * (z_A - z_D)],
+        [2 * (x_B - x_D), 2 * (y_B - y_D), 2 * (z_B - z_D)],
+        [2 * (x_C - x_D), 2 * (y_C - y_D), 2 * (z_C - z_D)]
+    ])
+
+    # Matrix P
+    P = np.array([
+        [(x_A**2 - x_D**2) + (y_A**2 - y_D**2) + (z_A**2 - z_D**2) - (d1**2 - d4**2)],
+        [(x_B**2 - x_D**2) + (y_B**2 - y_D**2) + (z_B**2 - z_D**2) - (d2**2 - d4**2)],
+        [(x_C**2 - x_D**2) + (y_C**2 - y_D**2) + (z_C**2 - z_D**2) - (d3**2 - d4**2)]
+    ])
+
+    # Solve for the unknown position
+    theta, _, _, _ = np.linalg.lstsq(A, P, rcond=None)
+    x, y, z = theta.flatten()
+
+    return np.array([x, y, z])
+
+
+def residuals(point, anchors, measured_distances):
+    calculated_distances = np.linalg.norm(anchors - point, axis=1)
+    print ("Calcualted Distance: ", calculated_distances)
+    error = calculated_distances - measured_distances
+    print("Error: ", error)
+    return error
+
+# Function to add errors to distances
+def add_errors(ds, max_error=0.5):
+    return [d + (2 * max_error * random.random() - max_error) for d in ds]
+
+# Number of positions to generate
+n = 50
+# Generate random true positions and distances
+true_positions = generate_positions(n)
+true_distances = get_distances(true_positions, anchors)
+
+# Initialize lists for estimated and optimized positions
+initial_est_positions = []
+optimized_positions = []
+total_distance_differences = []
+
+# Loop through each position
+for i in range(n):
+    measured_distances = add_errors(true_distances[i])
+    print ("Measured Distance: ", measured_distances)
+    
+
+    initial_est_pos = estimate_pos(anchors, measured_distances)
+    initial_est_positions.append(initial_est_pos)
+    print ("Estimated Pos: ", initial_est_positions)
+    initial_guess = [0, 0, 0]
+    result = least_squares(residuals, initial_guess, args=(anchors, measured_distances))
+    optimized_positions.append(result.x)
+    print ("Value: ", result)
+
+
+print ("True Position: ", true_positions)
+print ("True Distance: ", true_distances)
+
+print ("Estimated Pos: ", initial_est_positions)
+print ("Optimized Pos: ", optimized_positions)
+
+# Convert lists to arrays for calculations and plotting
+true_positions = np.array([[p['x'], p['y'], p['z']] for p in true_positions])
+initial_est_positions = np.array(initial_est_positions)
+optimized_positions = np.array(optimized_positions)
+
+# Calculate errors between true and optimized positions
+pos_errors = np.linalg.norm(true_positions - optimized_positions, axis=1)
+print ("POS Error: ", pos_errors)
+
+
+# Plotting the error between true and optimized positions with labels
+plt.figure(figsize=(10, 6))
+plt.plot(range(n), pos_errors, marker='o', linestyle='-', color='r', label='Position Error')
+for i, error in enumerate(pos_errors):
+    plt.text(i, error, f'{i}', fontsize=8, ha='right', va='bottom')
+plt.xlabel('Position Index')
+plt.ylabel('Error (Euclidean Distance)')
+plt.title('Error between True Positions and Optimized Positions')
+plt.grid(True)
+plt.legend()
+plt.show()
+
+
+# Plotting the 3D positions with labels
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+
+# Plot true positions
+ax.scatter(true_positions[:, 0], true_positions[:, 1], true_positions[:, 2], c='g', label='True Positions')
+for i, pos in enumerate(true_positions):
+    ax.text(pos[0], pos[1], pos[2], f'{i}', fontsize=8, color='g')
+
+# Plot initial estimated positions
+ax.scatter(initial_est_positions[:, 0], initial_est_positions[:, 1], initial_est_positions[:, 2], c='r', label='Initial Estimates')
+for i, pos in enumerate(initial_est_positions):
+    ax.text(pos[0], pos[1], pos[2], f'{i}', fontsize=8, color='r')
+
+# Plot optimized positions
+ax.scatter(optimized_positions[:, 0], optimized_positions[:, 1], optimized_positions[:, 2], c='b', label='Optimized Positions')
+for i, pos in enumerate(optimized_positions):
+    ax.text(pos[0], pos[1], pos[2], f'{i}', fontsize=8, color='b')
+
+# Set plot labels and legend
+ax.set_xlabel('X')
+ax.set_ylabel('Y')
+ax.set_zlabel('Z')
+ax.set_title('True vs Estimated vs Optimized Positions')
+ax.legend()
+
+plt.show()
+
