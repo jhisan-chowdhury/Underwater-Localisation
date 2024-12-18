@@ -1,0 +1,90 @@
+# Underwater localization is achieved using three anchor nodes, with two designated as Anchor 1 and Anchor 2, and the third referred to as the mother node.
+# The MQTT protocol is implemented to synchronize the anchor nodes.
+# A method for converting coordinates from the local frame to the global frame has also been developed.
+
+# Code for anchor node 1
+
+import paho.mqtt.client as mqttclient
+import time
+import serial
+from nm3driver import Nm3
+from nm3driver import MessagePacket
+
+
+broker_address = "cges1.local"
+port = 1883
+connected = False
+
+topic_1 = "topic/message"
+
+def on_connect(client, userdata, flags, rc):
+    global connected 
+    if rc == 0:
+        print('Client is connected to the broker')
+        connected = True
+        client.subscribe("GET")
+    else: 
+        print('Connection failed')
+
+def example_ping(nm3_modem, remote_address):
+    """Example: $P - Ping"""
+    print('Example: Ping')
+
+    ret = nm3_modem.send_ping(remote_address)
+    if ret == -1:
+        print(' Error')
+    else:
+        print('Time of Arrival={:.6f} seconds'.format(ret))
+        distance = ret * 343  
+        print(f'Distance = {distance}m')
+        
+        return distance
+    return None
+
+# mqqt on_received callback
+def on_received(client, userdata, message):
+    global localising
+    global d1
+    msg = message.payload.decode('utf-8')
+    print(f"Message received: {msg}  - Topic: {message.topic}")
+    if (message.topic == "GET"):
+        if (msg == "D1"):
+              d1 = example_ping(nm3_modem=nm3_modem, remote_address=remote_address)
+              """
+              tmp = None
+              if d1 is not None:
+                  tmp = "{" + "\"valid\":1,"+ f"d: {d1}"+ "}"
+              else:
+                  tmp = "{" + "\"valid\":0"+ "}"
+              """
+              print(f"publish topic D1 - msg {d1}")
+              client.publish("D1",f"{d1}")
+          
+              
+# intialise port and modem
+serial_port = serial.Serial('/dev/ttyUSB0', 9600, 8, serial.PARITY_NONE, serial.STOPBITS_ONE, 0.1)
+nm3_modem = Nm3(input_stream=serial_port, output_stream=serial_port)
+local_address = 200
+remote_address = 250
+
+
+
+client = mqttclient.Client()
+client.on_connect = on_connect
+client.on_message = on_received
+
+client.connect(broker_address, port=port)
+
+client.loop_start()
+time.sleep(0.2)
+
+while connected:
+   
+   time.sleep(0.1)
+    
+   
+client.loop_stop()
+client.disconnect()
+
+
+
