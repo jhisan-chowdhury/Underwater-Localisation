@@ -1,0 +1,284 @@
+# Underwater localization is achieved using three anchor nodes, with two designated as Anchor 1 and Anchor 2, and the third referred to as the mother node.
+# The MQTT protocol is implemented to synchronize the anchor nodes.
+# A method for converting coordinates from the local frame to the global frame has also been developed.
+
+# Code for mothernode_trilateration
+
+import paho.mqtt.client as mqttclient
+import time
+import math
+import pyproj
+import serial
+import pynmea2
+import json
+import numpy as np
+from nm3driver import Nm3
+from nm3driver import MessagePacket
+
+
+# declare variables and constants
+topic_1 = "topic/message"
+connected = False
+messagereceived = False
+broker_address = "cges1.local"
+port = 1883
+local_address = 200
+remote_address = 250
+localising = False
+d1_flag = False
+d2_flag = False
+d3_flag = False 
+d4_flag = False
+d1 = None
+d2 = None
+d3 = None
+d4 = None
+latest_GPS = None
+
+# mqqt on_connect callback
+def on_connect(client, userdata, flags, rc):
+    global connected
+    if rc == 0:
+        print('Client is connected to the broker')
+        connected = True
+        client.subscribe("#")
+    else: 
+        print('Connection failed')
+
+# mqqt on_received callback
+def on_received(client, userdata, message):
+    global localising
+    global d2, d3, d4, latest_GPS, d2_flag, d3_flag, d4_flag
+    
+    msg = message.payload.decode('utf-8')
+    if (message.topic == "D2"):
+        print(f"Message received: {msg}  - Topic: {message.topic}")
+        if msg == "None":
+            d2 = None
+        else:
+            d2 = float(msg)
+        d2_flag = False
+    elif (message.topic == "D3"):
+        print(f"Message received: {msg}  - Topic: {message.topic}")
+        if msg == "None":
+            d3 = None
+        else:
+            d3 = float(msg)
+        d3_flag = False
+    elif (message.topic == "D4"):
+        print(f"Message received: {msg}  - Topic: {message.topic}")
+        if msg == "None":
+            d4 = None
+        else:
+            d4 = float(msg)
+        d4_flag = False      
+        
+    elif (message.topic == "GPS"):
+        print(f"GPS received: {msg} - Topic - {message.topic}")
+        tmp_data = json.loads(msg)
+        if tmp_data['hasData']:
+            print(f"GPS received: {tmp_data['Lat']}, {tmp_data['Lon']}, {tmp_data['timestamp']} - Topic: {message.topic}")
+        else:
+            print(f"No GPS received - Topic: {message.topic}")
+        flag = False
+        
+
+def example_ping(nm3_modem, remote_address):
+    """Example: $P - Ping"""
+    #print('Example: Ping')
+
+    ret = nm3_modem.send_ping(remote_address)
+    if ret == -1:
+        print(' Error')
+    else:
+        #print('Time of Arrival={:.6f} seconds'.format(ret))
+        distance = ret * 343
+        #print(f'Distance = {distance}m')
+        return distance
+    return None
+
+
+
+def example_unicast_data(nm3_modem, remote_address, message):
+    """Example: $U - Unicast Data."""
+    #print('Example: Unicast Data')
+
+    sent_bytes_count = nm3_modem.send_unicast_message(remote_address, message)
+    if sent_bytes_count == -1:
+        print(' Error')
+    else:
+        # Pause for the modem to finish the transmission
+        time.sleep(4.0)
+        #print(' Bytes Transmitted={:02d}'.format(sent_bytes_count))
+         
+def lla2xyz(lla):
+    ecef = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:4978")  # LLA (WGS84) to ECEF
+    lat, lon, alt = lla
+    x, y, z = ecef.transform(lat, lon, alt)
+    
+    
+    return x, y, z
+
+
+def xyz2lla(xyz):
+
+    lla = pyproj.Transformer.from_crs("EPSG:4978", "EPSG:4326")  # ECEF to LLA
+    x, y, z = xyz
+    lat, lon, alt = lla.transform(x, y, z)
+    return lat, lon, alt
+    
+def calculatePosition(XYZ_A, XYZ_B, XYZ_C, XYZ_D, _d1, _d2, _d3, _d4, z_depth):
+    isValid = True
+    if ((_d1 is None) or (_d2 is None) or (_d3 is None) or (_d4 is None)):
+        isValid = False
+    
+    if not isValid:
+        return None
+    
+    x_A, y_A, z_A = XYZ_A[:3]
+    x_B, y_B, z_B = XYZ_B[:3]
+    x_C, y_C, z_C = XYZ_C[:3]
+    x_D, y_D, z_D = XYZ_D[:3]
+    #z = z_depth
+    
+    A = np.array ([
+    [2 * (x_A - x_D), 2 * (y_A - y_D), 2* (z_A - z_D)],
+    [2 * (x_B - x_D), 2 * (y_B - y_D), 2* (z_B - z_D)],
+    [2 * (x_C - x_D), 2 * (y_C - y_D), 2* (z_C - z_D)]
+    ])
+
+    P = np.array([
+     [((x_A ** 2) - (x_D ** 2)) + ((y_A ** 2) - (y_D ** 2)) + ((z_A ** 2) - (z_D ** 2))- ((_d1 ** 2) - (_d4 ** 2))],
+     [((x_B ** 2) - (x_D ** 2)) + ((y_B ** 2) - (y_D ** 2)) + ((z_B ** 2) - (z_D ** 2))- ((_d2 ** 2) - (_d4 ** 2))],
+     [((x_C ** 2) - (x_D ** 2)) + ((y_C ** 2) - (y_D ** 2)) + ((z_C ** 2) - (z_D ** 2))- ((_d3 ** 2) - (_d4 ** 2))]
+    ])
+   
+    try:
+        A_inv = np.linalg.inv(A) 
+        theta = A_inv @ P
+        x, y, z = theta.flatten()
+        print (f"Possible location: {x}, {y}, {z}")
+        return [float(x), float (y), float(z)]
+        
+    except:
+        print('Change the anchor node position')
+ 
+# intialise port and modem
+serial_port = serial.Serial('/dev/ttyUSB0', 9600, 8, serial.PARITY_NONE, serial.STOPBITS_ONE, 0.1)
+nm3_modem = Nm3(input_stream=serial_port, output_stream=serial_port)
+
+
+local_address = 200
+remote_address = 250
+message = b'GPS'
+
+# initialise MQQT connection
+client = mqttclient.Client()
+client.on_connect = on_connect
+client.on_message = on_received
+
+client.connect (broker_address, port = port)
+
+client.loop_start()
+time.sleep(0.2)
+
+INTERVAL = 10           # repeat every 10s
+cur_ts = time.time()
+
+while connected:
+    # get d1 (from CGGE1), d2 (Monitor.py) and d3 (CGES3 or Local)    
+    # d1 goes through MQQT 
+    # d2 goes through MQQT 
+    # ask CGES1 and Monitor.py to retrive d1 & d2
+    d1_flag = True
+    d2_flag = True
+    d3_flag = True
+    d4_flag = True
+    client.publish("GET","D2")
+    time.sleep(1.0)
+    client.publish("GET","D3")
+    time.sleep(1.0)
+    client.publish("GET","D4")
+    #wait for result
+    while d2_flag or d3_flag or d4_flag:
+        x = 1
+    
+    print(f"d2 = {d2}")
+    print(f"d3 = {d3}")
+    print (f"d4 = {d4}")
+    d1 = example_ping(nm3_modem=nm3_modem, remote_address=remote_address)
+    d1_flag = False
+    print(f"d1 = {d1}")
+    
+    # localisation algorithm here (function())
+    # Coordinates of anchor nodes
+    lla_1 = (-31.752605, 115.772247, 20)
+    lla_2 = (-31.752601, 115.772244, 25)
+    lla_3 = (-31.752607, 115.772239, 30)
+    lla_4 = (-31.752603, 115.772242, 40)
+    z_depth = 1  # Given depth
+    
+    XYZ_A = lla2xyz(lla_1)
+    print(f'XYZ_A: {XYZ_A}')
+
+    XYZ_B = lla2xyz(lla_2)
+    print(f'XYZ_B: {XYZ_B}')
+
+    XYZ_C = lla2xyz(lla_3)
+    print(f'XYZ_C: {XYZ_C}')
+
+    XYZ_D = lla2xyz(lla_4)
+    print(f'XYZ_D: {XYZ_D}')
+
+    # Convert back to LLA from XYZ
+    lla_A = xyz2lla(XYZ_A)
+    print(f'LLA_A: {lla_A}')
+    
+    lla_B = xyz2lla(XYZ_B)
+    print(f'LLA_B: {lla_B}')
+    
+    lla_C = xyz2lla(XYZ_C)
+    print(f'LLA_C: {lla_C}')
+
+    lla_D = xyz2lla(XYZ_D)
+    print(f'LLA_D: {lla_D}')
+    
+    # Perform trilateration 
+
+    receiver_location = calculatePosition(XYZ_A, XYZ_B, XYZ_C, XYZ_D, d1, d2, d3, d4, z_depth)
+    
+    time.sleep(0.5)
+    
+    if receiver_location is not None:
+        print(f"Receiver Location in cartesian form: {receiver_location}")
+        new_lla = xyz2lla(receiver_location)
+        print(f"Receiver location in LLA form: {new_lla}")
+        example_unicast_data(nm3_modem=nm3_modem, remote_address = remote_address, message=message) 
+    else:
+        print("Communication Broke; Restart the Process")
+        
+    # Periodically poll the serial port for bytes
+    nm3_modem.poll_receiver()
+
+    # Periodically process any bytes received
+    nm3_modem.process_incoming_buffer()
+
+    # Periodically check for received packets
+    while nm3_modem.has_received_packet():
+        message_packet = nm3_modem.get_received_packet()
+
+        payload_as_string = bytes(message_packet.packet_payload).decode('utf-8')
+        #print('Received a message packet: ')
+        #print(' serial_string: ' + message_packet.serial_string)
+        #print(' type: ' + MessagePacket.PACKETTYPE_NAMES[message_packet.packet_type])
+        #print(' src: ' + str(message_packet.source_address))
+        print(' data: ' + payload_as_string)
+        #print(' lqi: ' + str(message_packet.packet_lqi))
+        #print(' doppler: ' + str(message_packet.packet_doppler))
+        #print(' timestamp_count: ' + str(message_packet.packet_timestamp_count))    
+   
+    time.sleep(INTERVAL)
+
+ 
+  
+client.loop_stop()
