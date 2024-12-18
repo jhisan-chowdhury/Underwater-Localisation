@@ -1,0 +1,103 @@
+import numpy as np
+import pyproj
+import scipy.spatial.transform     
+
+def geodetic2enu(lat, lon, alt, lat_org, lon_org, alt_org):
+    transformer = pyproj.Transformer.from_crs(
+        {"proj":'latlong', "ellps":'WGS84', "datum":'WGS84'},
+        {"proj":'geocent', "ellps":'WGS84', "datum":'WGS84'},
+        )
+    x, y, z = transformer.transform( lon,lat,  alt,radians=False)
+    print (x, y, z)
+    x_org, y_org, z_org = transformer.transform( lon_org,lat_org,  alt_org,radians=False)
+    vec=np.array([[ x-x_org, y-y_org, z-z_org]]).T
+
+    rot1 =  scipy.spatial.transform.Rotation.from_euler('x', -(90-lat_org), degrees=True).as_matrix()#angle*-1 : left handed *-1
+    rot3 =  scipy.spatial.transform.Rotation.from_euler('z', -(90+lon_org), degrees=True).as_matrix()#angle*-1 : left handed *-1
+
+    rotMatrix = rot1.dot(rot3)    
+   
+    enu = rotMatrix.dot(vec).T.ravel()
+    return enu.T
+
+def enu2geodetic(x,y,z, lat_org, lon_org, alt_org):
+    transformer1 = pyproj.Transformer.from_crs(
+        {"proj":'latlong', "ellps":'WGS84', "datum":'WGS84'},
+        {"proj":'geocent', "ellps":'WGS84', "datum":'WGS84'},
+        )
+    transformer2 = pyproj.Transformer.from_crs(
+        {"proj":'geocent', "ellps":'WGS84', "datum":'WGS84'},
+        {"proj":'latlong', "ellps":'WGS84', "datum":'WGS84'},
+        )
+    
+    x_org, y_org, z_org = transformer1.transform( lon_org,lat_org,  alt_org,radians=False)
+    print ({x_org}, {y_org}, {z_org})
+    ecef_org=np.array([[x_org,y_org,z_org]]).T
+    
+    rot1 =  scipy.spatial.transform.Rotation.from_euler('x', -(90-lat_org), degrees=True).as_matrix()#angle*-1 : left handed *-1
+    rot3 =  scipy.spatial.transform.Rotation.from_euler('z', -(90+lon_org), degrees=True).as_matrix()#angle*-1 : left handed *-1
+
+    rotMatrix = rot1.dot(rot3)
+ 
+    ecefDelta = rotMatrix.T.dot( np.array([[x,y,z]]).T )
+    ecef = ecefDelta+ecef_org
+    print ("ECEF: ", ecef)
+    lon, lat, alt = transformer2.transform( ecef[0,0],ecef[1,0],ecef[2,0],radians=False)
+
+    return [lat,lon,alt]
+
+
+
+
+lat_org = -32.02633  # Latitude of the origin in degrees
+lon_org = 115.768267   # Longitude of the origin in degrees
+alt_org = 10  # Altitude of the origin in meters
+
+lat_r = -32.026287906654744
+lon_r = 115.76843687077883
+alt_r = 2
+
+remote = geodetic2enu (lat_r, lon_r, alt_r, lat_org, lon_org, alt_org)
+print ("Remote in ENU: ", remote)
+
+lat2 = -32.026396
+lon2 = 115.768345
+alt2 = 10
+
+lat3 = -32.026351
+lon3 = 115.768306
+alt3 = 10
+
+anchor2_enu = geodetic2enu (lat2, lon2, alt2, lat_org, lon_org, alt_org)
+print ("Anchor_2 in ENU: ", anchor2_enu)
+
+anhcor3_enu = geodetic2enu (lat3, lon3, alt3, lat_org, lon_org, alt_org)
+print ("Anchor_3 in ENU: ", anhcor3_enu)
+
+# The original ENU coordinates of the anchor points
+#anchor_points_enu = [
+    #[0, 0, 0],     # Anchor 1
+    #[20, 0, 0],   # Anchor 2
+    #[-20, 5, 0],    # Anchor 3
+#]
+
+x_t, y_t, z_t = [ 1.584e+03,  3.602e+03, 0]
+lat, lon, alt = enu2geodetic (x_t, y_t, z_t, lat_org, lon_org, alt_org)
+print ("True: ", lat, lon, alt)
+
+
+
+# Step 1: Convert ENU to geodetic coordinates
+#anchor_points_geodetic = []
+#for enu in anchor_points_enu:
+    #x, y, z = enu
+    #lat, lon, alt = enu2geodetic(x, y, z, lat_org, lon_org, alt_org)
+    #anchor_points_geodetic.append((lat, lon, alt))
+#print (anchor_points_geodetic) 
+
+#lat, lon, alt = enu2geodetic (x_r, y_r, z_r, lat_org, lon_org, alt_org)
+#print ("Opt: ", lat, lon, alt)
+# Step 2: Convert back from geodetic to ENU and compare
+#for i, (lat, lon, alt) in enumerate(anchor_points_geodetic):
+    #enu = geodetic2enu(lat, lon, alt, lat_org, lon_org, alt_org)
+    #print(f"Anchor {i+1}: Original ENU = {anchor_points_enu[i]}, Converted ENU = {enu}")
