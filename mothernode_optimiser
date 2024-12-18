@@ -1,0 +1,318 @@
+# Underwater localization is achieved using three anchor nodes, with two designated as Anchor 1 and Anchor 2, and the third referred to as the mother node.
+# The MQTT protocol is implemented to synchronize the anchor nodes.
+# A method for converting coordinates from the local frame to the global frame has also been developed.
+
+
+# Code for mothernode
+
+
+import numpy as np
+import pyproj, time, serial, pynmea2, json, folium
+import scipy.spatial.transform     
+from scipy.optimize import least_squares
+import paho.mqtt.client as mqttclient
+from nm3driver import Nm3
+from nm3driver import MessagePacket
+
+# declare variables and constants
+topic_1 = "topic/message"
+connected = False
+messagereceived = False
+broker_address = "cges1.local"
+port = 1883
+local_address = 222
+remote_address = 250
+localising = False
+d1_flag = False
+d2_flag = False
+d3_flag = False 
+d1 = None
+d2 = None
+d3 = None
+latest_GPS = None
+
+
+# Global to ENU frame conversion
+def geodetic2enu(lat, lon, alt, lat_org, lon_org, alt_org):
+    transformer = pyproj.Transformer.from_crs(
+        {"proj":'latlong', "ellps":'WGS84', "datum":'WGS84'},
+        {"proj":'geocent', "ellps":'WGS84', "datum":'WGS84'},
+        )
+    x, y, z = transformer.transform( lon,lat,  alt,radians=False)
+    #print (x, y, z)
+    x_org, y_org, z_org = transformer.transform( lon_org,lat_org,  alt_org,radians=False)
+    vec=np.array([[ x-x_org, y-y_org, z-z_org]]).T
+
+    rot1 =  scipy.spatial.transform.Rotation.from_euler('x', -(90-lat_org), degrees=True).as_matrix()#angle*-1 : left handed *-1
+    rot3 =  scipy.spatial.transform.Rotation.from_euler('z', -(90+lon_org), degrees=True).as_matrix()#angle*-1 : left handed *-1
+
+    rotMatrix = rot1.dot(rot3)    
+   
+    enu = rotMatrix.dot(vec).T.ravel()
+    return enu.T
+
+# ENU to Global frame conversion
+def enu2geodetic(x,y,z, lat_org, lon_org, alt_org):
+    transformer1 = pyproj.Transformer.from_crs(
+        {"proj":'latlong', "ellps":'WGS84', "datum":'WGS84'},
+        {"proj":'geocent', "ellps":'WGS84', "datum":'WGS84'},
+        )
+    transformer2 = pyproj.Transformer.from_crs(
+        {"proj":'geocent', "ellps":'WGS84', "datum":'WGS84'},
+        {"proj":'latlong', "ellps":'WGS84', "datum":'WGS84'},
+        )
+      
+    x_org, y_org, z_org = transformer1.transform( lon_org,lat_org,  alt_org,radians=False)
+    #print ({x_org}, {y_org}, {z_org})
+    ecef_org=np.array([[x_org,y_org,z_org]]).T
+    
+    rot1 =  scipy.spatial.transform.Rotation.from_euler('x', -(90-lat_org), degrees=True).as_matrix()#angle*-1 : left handed *-1
+    rot3 =  scipy.spatial.transform.Rotation.from_euler('z', -(90+lon_org), degrees=True).as_matrix()#angle*-1 : left handed *-1
+
+    rotMatrix = rot1.dot(rot3)
+ 
+    ecefDelta = rotMatrix.T.dot( np.array([[x,y,z]]).T )
+    ecef = ecefDelta+ecef_org
+    print ("ECEF (Remote): ", ecef)
+    lon, lat, alt = transformer2.transform( ecef[0,0],ecef[1,0],ecef[2,0],radians=False)
+
+    return [lat,lon,alt]
+
+# mqqt on_connect callback
+def on_connect(client, userdata, flags, rc):
+    global connected
+    if rc == 0:
+        print('Client is connected to the broker')
+        connected = True
+        client.subscribe("#")
+    else: 
+        print('Connection failed')
+
+# mqqt on_received callback
+def on_received(client, userdata, message):
+    global localising
+    global d1, d2, latest_GPS, d1_flag, d2_flag
+    
+    msg = message.payload.decode('utf-8')
+    if (message.topic == "D1"):
+        print(f"Message received: {msg}  - Topic: {message.topic}")
+        if msg == "None":
+            d1 = None
+        else:
+            d1 = float(msg)
+        d1_flag = False
+    elif (message.topic == "D2"):
+        print(f"Message received: {msg}  - Topic: {message.topic}")
+        if msg == "None":
+            d2 = None
+        else:
+            d2 = float(msg)
+        d2_flag = False
+    elif (message.topic == "GPS"):
+        print(f"GPS received: {msg} - Topic - {message.topic}")
+        tmp_data = json.loads(msg)
+        if tmp_data['hasData']:
+            print(f"GPS received: {tmp_data['Lat']}, {tmp_data['Lon']}, {tmp_data['timestamp']} - Topic: {message.topic}")
+        else:
+            print(f"No GPS received - Topic: {message.topic}")
+        flag = False
+        
+
+def example_ping(nm3_modem, remote_address):
+    """Example: $P - Ping"""
+    #print('Example: Ping')
+
+    ret = nm3_modem.send_ping(remote_address)
+    if ret == -1:
+        print(' Error')
+    else:
+        #print('Time of Arrival={:.6f} seconds'.format(ret))
+        distance = ret * 343
+        #print(f'Distance = {distance}m')
+        return distance
+    return None
+
+
+
+def example_unicast_data(nm3_modem, remote_address, message):
+    """Example: $U - Unicast Data."""
+    #print('Example: Unicast Data')
+
+    sent_bytes_count = nm3_modem.send_unicast_message(remote_address, message)
+    if sent_bytes_count == -1:
+        print(' Error')
+    else:
+        # Pause for the modem to finish the transmission
+        time.sleep(4.0)
+        #print(' Bytes Transmitted={:02d}'.format(sent_bytes_count))
+
+
+def residuals(point, anchors, measured_distances):
+    calculated_distances = np.linalg.norm(anchors - point, axis=1)
+    #print ("Calculated Distance: ", calculated_distances)
+    error = calculated_distances - measured_distances
+    return error
+
+
+
+#Map View
+def create_map(lat_org, lon_org, anchor_positions, remote_position):
+    # Create a folium map centered at the origin
+    m = folium.Map(location=[lat_org, lon_org], zoom_start=18)
+
+    # Add anchor nodes to the map
+    for i, (lat, lon, alt) in enumerate(anchor_positions):
+        folium.Marker(
+            location=[lat, lon],  # Use only latitude and longitude
+            popup=f"Anchor {i+1}: ({lat}, {lon}, {alt}m)",
+            icon=folium.Icon(color="blue", icon="info-sign"),
+        ).add_to(m)
+
+    # Add the remote node to the map
+    if remote_position:
+        folium.Marker(
+            location=[remote_position[0], remote_position[1]],  # Use only latitude and longitude
+            popup=f"Remote Node: ({remote_position[0]}, {remote_position[1]}, {remote_position[2]}m)",
+            icon=folium.Icon(color="red", icon="info-sign"),
+        ).add_to(m)
+    # Add the GPS Sensor data to the map
+    
+    
+    
+    # Save the map to an HTML file
+    map_file = "/home/pi/nm3-python-driver/anchor_remote_map.html"  # Adjust path if needed
+    m.save(map_file)
+    print(f"Map saved as {map_file}. Open it in a browser to view.")
+
+
+# Global Coordinate of origin
+lat_org = -31.752562  # Latitude of the origin in degrees
+lon_org = 115.772293   # Longitude of the origin in degrees
+alt_org = 40  # Altitude of the origin in meters
+
+# Global Coordinate of Anchor node 2
+lat2 = -31.752555
+lon2 = 115.772299
+alt2 = 40
+
+# Global Coordinate of Anchor node 3
+lat3 = -31.752567
+lon3 = 115.772300
+alt3 = 40
+
+# ENU coordinate of Anchor node 2
+anchor2_enu = geodetic2enu (lat2, lon2, alt2, lat_org, lon_org, alt_org)
+#print ("Anchor_2 in ENU: ", anchor2_enu)
+
+
+# ENU frame of Anchor node 3
+anhcor3_enu = geodetic2enu (lat3, lon3, alt3, lat_org, lon_org, alt_org)
+#print ("Anchor_3 in ENU: ", anhcor3_enu)
+
+#Anchors
+anchors = np.array([
+    [0, 0],     
+    [anchor2_enu [0], anchor2_enu [1]], 
+    [anhcor3_enu [0], anhcor3_enu [1]]    
+])
+    
+
+# intialise port and modem
+serial_port = serial.Serial('/dev/ttyUSB0', 9600, 8, serial.PARITY_NONE, serial.STOPBITS_ONE, 0.1)
+nm3_modem = Nm3(input_stream=serial_port, output_stream=serial_port)
+
+
+local_address = 200
+remote_address = 250
+message = b'GPS'
+
+# initialise MQQT connection
+client = mqttclient.Client()
+client.on_connect = on_connect
+client.on_message = on_received
+
+client.connect (broker_address, port = port)
+
+client.loop_start()
+time.sleep(0.2)
+
+INTERVAL = 10           # repeat every 10s
+cur_ts = time.time()
+
+while connected:
+    # get d1 (from CGGE1), d2 (Monitor.py) and d3 (CGES3 or Local)    
+    # d1 goes through MQQT 
+    # d2 goes through MQQT 
+    # ask CGES1 and Monitor.py to retrive d1 & d2
+    d1_flag = True
+    d2_flag = True
+    d3_flag = True
+    client.publish("GET","D1")
+    time.sleep(0.5)
+    client.publish("GET","D2")
+    
+    #wait for result
+    while d1_flag or d2_flag:
+        x = 1
+    
+    print(f"d1 = {d1}")
+    print(f"d2 = {d2}")
+    d3 = example_ping(nm3_modem=nm3_modem, remote_address=remote_address)
+    d3_flag = False
+    print(f"d3 = {d3}")
+
+    # Perform optimization 
+    isValid = True
+    if ((d1 is None) or (d2 is None) or (d3 is None)):
+        isValid = False
+    else:
+        measured_distances = [d1, d2, d3]
+        initial_guess = [0, 0]
+        result = least_squares(residuals, initial_guess,  args=(anchors, measured_distances))
+        optimized_position = result.x
+        print ("Optimized Position: ", optimized_position)
+
+        # Global Coordinate of Remote Node
+        x_r, y_r, z_r = [ optimized_position [0], optimized_position [1], 0]
+        lat_r, lon_r, alt_r = enu2geodetic (x_r, y_r, z_r, lat_org, lon_org, alt_org)
+        print ("Remote Node: ", lat_r, lon_r, alt_r)
+        
+        #Get GPS
+        example_unicast_data(nm3_modem, remote_address, message)
+ 
+        # Periodically poll the serial port for bytes
+        nm3_modem.poll_receiver()
+ 
+        # Periodically process any bytes received
+        nm3_modem.process_incoming_buffer()
+
+        # Periodically check for received packets
+        while nm3_modem.has_received_packet():
+            message_packet = nm3_modem.get_received_packet()
+
+            payload_as_string = bytes(message_packet.packet_payload).decode('utf-8')
+            #print('Received a message packet: ')
+            #print(' serial_string: ' + message_packet.serial_string)
+            #print(' type: ' + MessagePacket.PACKETTYPE_NAMES[message_packet.packet_type])
+            #print(' src: ' + str(message_packet.source_address))
+            print(' data: ' + payload_as_string)
+            #print(' lqi: ' + str(message_packet.packet_lqi))
+            #print(' doppler: ' + str(message_packet.packet_doppler))
+            #print(' timestamp_count: ' + str(message_packet.packet_timestamp_count))    
+      
+        time.sleep(INTERVAL)
+        
+       # Define anchor positions and the remote position for map view
+        anchor_positions = [
+        (lat_org, lon_org, alt_org),  # Anchor 1
+        (lat2, lon2, alt2),          # Anchor 2
+        (lat3, lon3, alt3),          # Anchor 3
+        ]
+
+        remote_position = [lat_r, lon_r, alt_r]  # Remote node position
+
+        # Create the map
+        create_map(lat_org, lon_org, anchor_positions, remote_position)
+ 
+client.loop_stop()
+
