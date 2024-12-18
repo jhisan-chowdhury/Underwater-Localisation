@@ -1,0 +1,39 @@
+import numpy as np
+from scipy.optimize import minimize
+import pyproj
+import math
+
+XYZ_A =  (0, 0, 0)
+XYZ_B = (0.6, -0.3, -0.2)
+XYZ_C = (2.22, 2.7, 0.1)
+XYZ_D = (2.1, 0.4, 0.13)
+
+x_A, y_A, z_A = XYZ_A [:3]
+x_B, y_B, z_B = XYZ_B [:3]
+x_C, y_C, z_C = XYZ_C [:3]
+x_D, y_D, z_D = XYZ_D [:3]
+
+[d1, d2, d3, d4] = [16.242311614862782, 15.987746666523137, 17.789050544412678, 16.43463093976881]
+
+
+A = np.array([
+    [2 * (x_A - x_D), 2 * (y_A - y_D), 2 * (z_A - z_D)],
+    [2 * (x_B - x_D), 2 * (y_B - y_D), 2 * (z_B - z_D)],
+    [2 * (x_C - x_D), 2 * (y_C - y_D), 2 * (z_C - z_D)]
+])
+
+# Matrix P
+P = np.array([
+    [(x_A ** 2 - x_D ** 2) + (y_A ** 2 - y_D ** 2) + (z_A ** 2 - z_D ** 2) - (d1 ** 2 - d4 ** 2)],
+    [(x_B ** 2 - x_D ** 2) + (y_B ** 2 - y_D ** 2) + (z_B ** 2 - z_D ** 2) - (d2 ** 2 - d4 ** 2)],
+    [(x_C ** 2 - x_D ** 2) + (y_C ** 2 - y_D ** 2) + (z_C ** 2 - z_D ** 2) - (d3 ** 2 - d4 ** 2)]
+])
+
+# Solve for the unknown location
+theta = np.linalg.solve (A, P)
+
+#theta, residuals, rank, s = np.linalg.lstsq(A, P, rcond=None)
+x, y, z = theta.flatten()
+
+# Output the results
+print(f"Possible location: {x}, {y}, {z}")
