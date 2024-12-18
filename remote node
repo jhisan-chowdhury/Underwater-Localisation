@@ -1,0 +1,84 @@
+# Underwater localization is achieved using three anchor nodes, with two designated as Anchor 1 and Anchor 2, and the third referred to as the mother node.
+# The MQTT protocol is implemented to synchronize the anchor nodes.
+# A method for converting coordinates from the local frame to the global frame has also been developed.
+
+# Code for remote node
+
+import paho.mqtt.client as mqttclient
+import time
+import serial
+import pynmea2
+from nm3driver import Nm3
+from nm3driver import MessagePacket
+
+latest_GPS = None
+
+def parseGPS(str):
+    global latest_GPS
+    if str.find('GGA') > 0:
+        msg = pynmea2.parse(str)
+        latest_GPS = (msg.lat, msg.lon, msg.altitude, msg.timestamp)
+        print ("Timestamp: %s -- Lat: %s %s -- Lon: %s %s -- Altitude: %s %s" % (msg.timestamp,msg.lat,msg.lat_dir,msg.lon,msg.lon_dir,msg.altitude,msg.altitude_units))   
+
+
+
+def example_unicast_data(nm3_modem, remote_address, message):
+    """Example: $U - Unicast Data."""
+    #print('Example: Unicast Data')
+
+    sent_bytes_count = nm3_modem.send_unicast_message(remote_address, message)
+    if sent_bytes_count == -1:
+        print(' Error')
+    else:
+        # Pause for the modem to finish the transmission
+        time.sleep(4.0)
+        #print(' Bytes Transmitted={:02d}'.format(sent_bytes_count))      
+          
+# intialise port and modem
+serial_port = serial.Serial('/dev/ttyUSB0', 9600, 8, serial.PARITY_NONE, serial.STOPBITS_ONE, 0.1)
+nm3_modem = Nm3(input_stream=serial_port, output_stream=serial_port)
+gps_port = serial.Serial("/dev/ttyACM0", 9600, timeout=0.5)
+
+local_address = 123
+remote_address = 222
+payload_as_string = None
+
+while True:
+    str = gps_port.readline()
+    if str is not None:
+        parseGPS(str.decode("utf-8"))
+       
+    # add gps handling here
+    # Periodically poll the serial port for bytes
+    nm3_modem.poll_receiver()
+
+    # Periodically process any bytes received
+    nm3_modem.process_incoming_buffer()
+
+    # Periodically check for received packets
+    while nm3_modem.has_received_packet():
+        message_packet = nm3_modem.get_received_packet()
+
+        payload_as_string = bytes(message_packet.packet_payload).decode('utf-8')
+        # print('Received a message packet: ')
+        # print(' serial_string: ' + message_packet.serial_string)
+        # print(' type: ' + MessagePacket.PACKETTYPE_NAMES[message_packet.packet_type])
+        #print(' src: ' + str(message_packet.source_address))
+        print(' data: ' + payload_as_string)
+        #print(' lqi: ' + str(message_packet.packet_lqi))
+        #print(' doppler: ' + str(message_packet.packet_doppler))
+        #print(' timestamp_count: ' + str(message_packet.packet_timestamp_count))
+        
+        if payload_as_string == 'GPS':
+            # response here
+            
+            if latest_GPS[0] is not None:
+                tmp_payload = f"{latest_GPS[3]},{latest_GPS[0]},{latest_GPS[1]},{latest_GPS[2]}"
+            else:
+                tmp_payload = f",,,"
+
+            example_unicast_data(nm3_modem, remote_address, tmp_payload.encode())
+            
+     
+ 
+
