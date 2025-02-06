@@ -1,6 +1,6 @@
-## Underwater localization is achieved using three anchor nodes, with two designated as Anchor 1 and Anchor 2, and the third referred to as the mother node.
-# The MQTT protocol is implemented to synchronize the anchor nodes.
-# A method for converting coordinates from local to global frames has also been developed.
+**## Underwater localization is achieved using three anchor nodes, with two designated as Anchor 1 and Anchor 2, and the third referred to as the mother node.
+**# The MQTT protocol is implemented to synchronize the anchor nodes.
+**# A method for converting coordinates from local to global frames has also been developed.******
 
 
 
